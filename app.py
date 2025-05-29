@@ -825,6 +825,8 @@ from typing import (
     List,
     Optional,
 )  # Ensure these are imported for SearchedStationInfo
+import os  # For file operations
+import json  # For saving/loading favorites
 
 # Ensure SearchedStationInfo is defined (it should be with the SDK code)
 # If not, define it here:
@@ -836,67 +838,114 @@ from typing import (
 #     point_name: str
 #     dock_location: Optional[str]
 
+# --- Constants for Favorites Persistence ---
+FAVORITES_FILE = "tfl_cycle_favorites.json"
+
+
+# --- Helper Functions for Favorites Persistence ---
+def load_favorites_from_file() -> List[SearchedStationInfo]:
+    if os.path.exists(FAVORITES_FILE):
+        try:
+            with open(FAVORITES_FILE, "r") as f:
+                favorites_data = json.load(f)
+                # Basic validation: ensure it's a list
+                if isinstance(favorites_data, list):
+                    # Further validation could be added here to check structure of each item
+                    return favorites_data
+                else:
+                    logger.warning(
+                        f"Favorites file '{FAVORITES_FILE}' does not contain a list. Starting fresh."
+                    )
+                    return []
+        except json.JSONDecodeError:
+            logger.warning(
+                f"Error decoding favorites file '{FAVORITES_FILE}'. Starting fresh."
+            )
+            return []
+        except Exception as e:
+            logger.error(f"Error loading favorites from file: {e}")
+            return []  # Fallback to empty list on other errors
+    return []
+
+
+def save_favorites_to_file(favorites_list: List[SearchedStationInfo]):
+    try:
+        with open(FAVORITES_FILE, "w") as f:
+            json.dump(favorites_list, f, indent=2)
+        logger.info(f"Favorites saved to {FAVORITES_FILE}")
+    except Exception as e:
+        logger.error(f"Error saving favorites to file: {e}")
+
 
 # --- SDK Initialization and State Management ---
 def get_sdk():
     if "sdk" not in st.session_state:
+        # Configure logging for the SDK and app
         logging.basicConfig(
-            level=logging.INFO,
+            level=logging.INFO,  # Or logging.DEBUG for more SDK output
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         )
         st.session_state.sdk = TflCycleHireSDK()
         if not st.session_state.sdk._active_c3_encoding:
-            st.session_state.sdk.prime_tokens_from_static_location("cromer_street")
+            st.session_state.sdk.prime_tokens_from_static_location(
+                "cromer_street"
+            )  # Default priming
     return st.session_state.sdk
 
 
 # Initialize session state variables
 if "search_results" not in st.session_state:
     st.session_state.search_results = []
-if (
-    "selected_station_info_for_code" not in st.session_state
-):  # Store full info for display
+if "selected_station_info_for_code" not in st.session_state:
     st.session_state.selected_station_info_for_code = None
 if "release_code" not in st.session_state:
     st.session_state.release_code = None
 if "error_message" not in st.session_state:
     st.session_state.error_message = None
-if "favorites" not in st.session_state:  # List of SearchedStationInfo
-    st.session_state.favorites = []
+if "favorites" not in st.session_state:  # Load favorites from file on first run
+    st.session_state.favorites = load_favorites_from_file()
+
 
 # --- App UI ---
 st.set_page_config(layout="centered", page_title="TfL Cycle Hire")
 st.title("🚲 TfL Cycle Hire Code")
 
-sdk_instance = get_sdk()
+sdk_instance = get_sdk()  # Ensures SDK is initialized and logger is configured
 
 
-# --- Helper Functions for Favorites ---
+# --- Helper Functions for Favorites (Interacting with State and File) ---
 def add_to_favorites(station_info: SearchedStationInfo):
-    # Avoid duplicates based on station_id
     if not any(
         fav["station_id"] == station_info["station_id"]
         for fav in st.session_state.favorites
     ):
-        if station_info.get("terminal_name"):  # Only add hirable stations as favorites
+        if station_info.get("terminal_name"):
             st.session_state.favorites.append(station_info)
+            save_favorites_to_file(st.session_state.favorites)  # Save after adding
             st.success(f"Added '{station_info['name']}' to favorites!")
-            st.session_state.error_message = None  # Clear any previous error
+            st.session_state.error_message = None
         else:
             st.warning(
-                f"Cannot add '{station_info['name']}' to favorites: Not currently hirable (missing Terminal ID)."
+                f"Cannot add '{station_info['name']}' to favorites: Not currently hirable."
             )
     else:
         st.info(f"'{station_info['name']}' is already in favorites.")
 
 
 def remove_from_favorites(station_id: str):
+    # Find the name before removing for the success message
+    station_name_to_remove = "Station"
+    for fav in st.session_state.favorites:
+        if fav["station_id"] == station_id:
+            station_name_to_remove = fav["name"]
+            break
+
     st.session_state.favorites = [
         fav for fav in st.session_state.favorites if fav["station_id"] != station_id
     ]
-    st.success(f"Removed station ID {station_id} from favorites.")
-    st.session_state.error_message = None  # Clear any previous error
-    # If the currently displayed release code was for this favorite, clear it
+    save_favorites_to_file(st.session_state.favorites)  # Save after removing
+    st.success(f"Removed '{station_name_to_remove}' from favorites.")
+    st.session_state.error_message = None
     if (
         st.session_state.selected_station_info_for_code
         and st.session_state.selected_station_info_for_code["station_id"] == station_id
@@ -906,42 +955,42 @@ def remove_from_favorites(station_id: str):
 
 
 def handle_get_code_for_favorite(fav_station_info: SearchedStationInfo):
-    st.session_state.release_code = None
+    st.session_state.release_code = None  # Clear previous code display
+    st.session_state.selected_station_info_for_code = (
+        None  # Clear selected station for code display
+    )
     st.session_state.error_message = None
     with st.spinner(f"Getting code for favorite: {fav_station_info['name']}..."):
         try:
             code = sdk_instance.get_release_code_for_searched_station(fav_station_info)
             st.session_state.release_code = code
-            st.session_state.selected_station_info_for_code = (
-                fav_station_info  # Store for display
-            )
+            st.session_state.selected_station_info_for_code = fav_station_info
         except TflCycleHireSDKError as e:
             st.session_state.error_message = (
                 f"Error getting code for favorite '{fav_station_info['name']}': {e}"
             )
-            logger.error(
-                f"Streamlit App - Get Code for Favorite Error: {e}", exc_info=True
-            )
         except Exception as e:
             st.session_state.error_message = f"An unexpected error occurred: {e}"
-            logger.error(
-                f"Streamlit App - Unexpected Get Code for Favorite Error: {e}",
-                exc_info=True,
-            )
 
 
-# --- 1. Favorites Section (Displayed at the top if any exist) ---
+# --- 1. Favorites Section ---
 if st.session_state.favorites:
     st.markdown("---")
     st.subheader("⭐ Your Favorite Stations")
-    for fav_station in st.session_state.favorites:
+    # Create a copy for iteration if removing items might cause issues, though st.rerun helps
+    favorites_to_display = list(st.session_state.favorites)
+    for fav_station in favorites_to_display:
+        # Ensure fav_station is a dictionary and has 'station_id'
+        if not isinstance(fav_station, dict) or "station_id" not in fav_station:
+            logger.warning(f"Skipping invalid favorite item: {fav_station}")
+            continue
+
         col1, col2, col3 = st.columns([0.6, 0.25, 0.15])
         with col1:
             st.write(
-                f"**{fav_station['name']}** ({fav_station.get('subtitle', 'N/A')})"
+                f"**{fav_station.get('name', 'Unknown Station')}** ({fav_station.get('subtitle', 'N/A')})"
             )
         with col2:
-            # Use a unique key for each button
             if st.button("Get Code", key=f"fav_getcode_{fav_station['station_id']}"):
                 handle_get_code_for_favorite(fav_station)
         with col3:
@@ -952,10 +1001,16 @@ if st.session_state.favorites:
             ):
                 remove_from_favorites(fav_station["station_id"])
                 st.rerun()  # Rerun to update the favorites list display immediately
-    st.caption("Favorites are stored for the current session only.")
+    # st.caption("Favorites are saved locally in 'tfl_cycle_favorites.json'.") # Removed this as it's an implementation detail the user might not need
+else:  # No favorites yet
+    st.markdown("---")
+    st.info(
+        "No favorite stations yet. Search for stations and click '⭐' to add them here for quick access!"
+    )
 
 
 # --- 2. Search for Stations ---
+# ... (Search UI and logic remains the same as before) ...
 st.markdown("---")
 search_query = st.text_input(
     "Search for a station (e.g., 'King's Cross', 'Soho'):", key="search_query_input"
@@ -963,9 +1018,6 @@ search_query = st.text_input(
 
 if st.button("Search Stations", key="search_button"):
     st.session_state.search_results = []
-    # Don't clear release code if it was for a favorite, only if a new search is initiated.
-    # st.session_state.release_code = None
-    # st.session_state.selected_station_info_for_code = None
     st.session_state.error_message = None
 
     if search_query:
@@ -986,12 +1038,15 @@ if st.button("Search Stations", key="search_button"):
     else:
         st.warning("Please enter a search term.")
 
+
 # --- Display Error Messages (centralized) ---
 if st.session_state.error_message:
     st.error(st.session_state.error_message)
-    st.session_state.error_message = None  # Clear after displaying once
+    # Clear error after displaying to prevent it from showing up on next interaction if not relevant
+    st.session_state.error_message = None
 
 # --- 3. Select Station from Search and Get Code ---
+# ... (This section remains the same, including the "⭐ Add Fav" button logic) ...
 if st.session_state.search_results:
     st.markdown("---")
     st.subheader("Search Results:")
@@ -1004,7 +1059,7 @@ if st.session_state.search_results:
         st.info(
             "No stations with current bike availability (hirable) found in search results."
         )
-        if st.session_state.search_results:  # If there are results, but none hirable
+        if st.session_state.search_results:
             st.caption("Other stations found (not currently hirable):")
             for s_non_hirable in st.session_state.search_results:
                 if not s_non_hirable.get("terminal_name"):
@@ -1012,12 +1067,11 @@ if st.session_state.search_results:
                         f"- {s_non_hirable['name']} ({s_non_hirable.get('subtitle', 'N/A')})"
                     )
     else:
-        # Display hirable stations with options to Get Code or Add to Favorites
         for station_info in hirable_stations_from_search:
-            # Unique key prefix for this station in the search results
+            if not isinstance(station_info, dict) or "station_id" not in station_info:
+                logger.warning(f"Skipping invalid search result item: {station_info}")
+                continue
             key_prefix = f"search_{station_info['station_id']}"
-
-            # Check if already a favorite
             is_favorite = any(
                 fav["station_id"] == station_info["station_id"]
                 for fav in st.session_state.favorites
@@ -1027,12 +1081,13 @@ if st.session_state.search_results:
                 [0.4, 0.3, 0.15, 0.15]
             )
             with col_name:
-                st.write(f"**{station_info['name']}**")
+                st.write(f"**{station_info.get('name', 'Unknown')}**")
             with col_subtitle:
                 st.caption(f"{station_info.get('subtitle', 'N/A')}")
             with col_action1:
                 if st.button("Get Code", key=f"{key_prefix}_getcode"):
-                    st.session_state.release_code = None  # Clear previous
+                    st.session_state.release_code = None
+                    st.session_state.selected_station_info_for_code = None
                     st.session_state.error_message = None
                     with st.spinner(f"Getting code for {station_info['name']}..."):
                         try:
@@ -1057,13 +1112,13 @@ if st.session_state.search_results:
                         help="Add to favorites",
                     ):
                         add_to_favorites(station_info)
-                        st.rerun()  # Rerun to update favorite display immediately
+                        st.rerun()
                 else:
-                    # Could offer remove here too, or just rely on top section for removal
                     st.caption("✔️ Fav")
 
 
 # --- 4. Display Release Code ---
+# ... (This section remains the same) ...
 if st.session_state.release_code and st.session_state.selected_station_info_for_code:
     st.markdown("---")
     station_name_for_display = st.session_state.selected_station_info_for_code["name"]
@@ -1074,8 +1129,9 @@ if st.session_state.release_code and st.session_state.selected_station_info_for_
     )
     st.info("This code is likely valid for a limited time (e.g., 10 minutes).")
 
+
 st.markdown("---")
 st.caption("Minimalistic TfL Cycle Hire App. Relies on experimental SDK features.")
 st.caption(
-    "Token reusability is NOT guaranteed long-term. Favorites are session-specific."
+    "Token reusability is NOT guaranteed long-term. Favorites are saved locally in 'tfl_cycle_favorites.json'."
 )
