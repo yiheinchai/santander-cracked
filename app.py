@@ -820,59 +820,142 @@ class TflCycleHireSDK:
 
 # --- Streamlit App Code ---
 import streamlit as st
+from typing import (
+    TypedDict,
+    List,
+    Optional,
+)  # Ensure these are imported for SearchedStationInfo
+
+# Ensure SearchedStationInfo is defined (it should be with the SDK code)
+# If not, define it here:
+# class SearchedStationInfo(TypedDict, total=False):
+#     station_id: str
+#     name: str
+#     subtitle: str
+#     terminal_name: Optional[str]
+#     point_name: str
+#     dock_location: Optional[str]
+
 
 # --- SDK Initialization and State Management ---
-
-# Ensure this TypedDict is defined if you use it in the SDK
-from typing import TypedDict, List, Optional
-
-
-class SearchedStationInfo(TypedDict, total=False):  # total=False for flexibility
-    station_id: str
-    name: str
-    subtitle: str
-    terminal_name: Optional[str]
-    point_name: str
-    dock_location: Optional[str]
-
-
 def get_sdk():
-    """Initializes or retrieves the SDK instance from session state."""
     if "sdk" not in st.session_state:
-        # For the Streamlit app, we'll rely on the SDK's default user auth.
-        # Logging can be configured here if desired for Streamlit's console
         logging.basicConfig(
-            level=logging.INFO,  # Or logging.DEBUG for more SDK output
+            level=logging.INFO,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         )
         st.session_state.sdk = TflCycleHireSDK()
-        # Prime with some default tokens for the first search if needed
-        # This helps the first search to work without explicit token input in the UI
         if not st.session_state.sdk._active_c3_encoding:
-            st.session_state.sdk.prime_tokens_from_static_location(
-                "cromer_street"
-            )  # Pick one
+            st.session_state.sdk.prime_tokens_from_static_location("cromer_street")
     return st.session_state.sdk
 
 
 # Initialize session state variables
 if "search_results" not in st.session_state:
     st.session_state.search_results = []
-if "selected_station_id_for_code" not in st.session_state:
-    st.session_state.selected_station_id_for_code = None
+if (
+    "selected_station_info_for_code" not in st.session_state
+):  # Store full info for display
+    st.session_state.selected_station_info_for_code = None
 if "release_code" not in st.session_state:
     st.session_state.release_code = None
 if "error_message" not in st.session_state:
     st.session_state.error_message = None
+if "favorites" not in st.session_state:  # List of SearchedStationInfo
+    st.session_state.favorites = []
 
 # --- App UI ---
-
 st.set_page_config(layout="centered", page_title="TfL Cycle Hire")
 st.title("🚲 TfL Cycle Hire Code")
 
 sdk_instance = get_sdk()
 
-# --- 1. Search for Stations ---
+
+# --- Helper Functions for Favorites ---
+def add_to_favorites(station_info: SearchedStationInfo):
+    # Avoid duplicates based on station_id
+    if not any(
+        fav["station_id"] == station_info["station_id"]
+        for fav in st.session_state.favorites
+    ):
+        if station_info.get("terminal_name"):  # Only add hirable stations as favorites
+            st.session_state.favorites.append(station_info)
+            st.success(f"Added '{station_info['name']}' to favorites!")
+            st.session_state.error_message = None  # Clear any previous error
+        else:
+            st.warning(
+                f"Cannot add '{station_info['name']}' to favorites: Not currently hirable (missing Terminal ID)."
+            )
+    else:
+        st.info(f"'{station_info['name']}' is already in favorites.")
+
+
+def remove_from_favorites(station_id: str):
+    st.session_state.favorites = [
+        fav for fav in st.session_state.favorites if fav["station_id"] != station_id
+    ]
+    st.success(f"Removed station ID {station_id} from favorites.")
+    st.session_state.error_message = None  # Clear any previous error
+    # If the currently displayed release code was for this favorite, clear it
+    if (
+        st.session_state.selected_station_info_for_code
+        and st.session_state.selected_station_info_for_code["station_id"] == station_id
+    ):
+        st.session_state.release_code = None
+        st.session_state.selected_station_info_for_code = None
+
+
+def handle_get_code_for_favorite(fav_station_info: SearchedStationInfo):
+    st.session_state.release_code = None
+    st.session_state.error_message = None
+    with st.spinner(f"Getting code for favorite: {fav_station_info['name']}..."):
+        try:
+            code = sdk_instance.get_release_code_for_searched_station(fav_station_info)
+            st.session_state.release_code = code
+            st.session_state.selected_station_info_for_code = (
+                fav_station_info  # Store for display
+            )
+        except TflCycleHireSDKError as e:
+            st.session_state.error_message = (
+                f"Error getting code for favorite '{fav_station_info['name']}': {e}"
+            )
+            logger.error(
+                f"Streamlit App - Get Code for Favorite Error: {e}", exc_info=True
+            )
+        except Exception as e:
+            st.session_state.error_message = f"An unexpected error occurred: {e}"
+            logger.error(
+                f"Streamlit App - Unexpected Get Code for Favorite Error: {e}",
+                exc_info=True,
+            )
+
+
+# --- 1. Favorites Section (Displayed at the top if any exist) ---
+if st.session_state.favorites:
+    st.markdown("---")
+    st.subheader("⭐ Your Favorite Stations")
+    for fav_station in st.session_state.favorites:
+        col1, col2, col3 = st.columns([0.6, 0.25, 0.15])
+        with col1:
+            st.write(
+                f"**{fav_station['name']}** ({fav_station.get('subtitle', 'N/A')})"
+            )
+        with col2:
+            # Use a unique key for each button
+            if st.button("Get Code", key=f"fav_getcode_{fav_station['station_id']}"):
+                handle_get_code_for_favorite(fav_station)
+        with col3:
+            if st.button(
+                "✖️",
+                key=f"fav_remove_{fav_station['station_id']}",
+                help="Remove from favorites",
+            ):
+                remove_from_favorites(fav_station["station_id"])
+                st.rerun()  # Rerun to update the favorites list display immediately
+    st.caption("Favorites are stored for the current session only.")
+
+
+# --- 2. Search for Stations ---
 st.markdown("---")
 search_query = st.text_input(
     "Search for a station (e.g., 'King's Cross', 'Soho'):", key="search_query_input"
@@ -880,132 +963,110 @@ search_query = st.text_input(
 
 if st.button("Search Stations", key="search_button"):
     st.session_state.search_results = []
-    st.session_state.release_code = None  # Clear old release code
-    st.session_state.selected_station_id_for_code = None
+    # Don't clear release code if it was for a favorite, only if a new search is initiated.
+    # st.session_state.release_code = None
+    # st.session_state.selected_station_info_for_code = None
     st.session_state.error_message = None
 
     if search_query:
         with st.spinner(f"Searching for '{search_query}'..."):
             try:
-                # The search_stations method in the SDK will try to use active tokens
-                # or prime itself if prime_from_static_if_no_active is used.
-                # For simplicity in the UI, we rely on this internal SDK logic.
-                # We ensure SDK is primed upon initialization for the first search.
                 results = sdk_instance.search_stations(
-                    search_query,
-                    # If no active tokens, SDK will try to use one from static data if configured.
-                    # Here, we rely on the initial priming in get_sdk() or subsequent successful calls.
-                    # Alternatively, explicitly prime before search:
-                    prime_from_static_if_no_active="cromer_street",  # Or another reliable static key
+                    search_query, prime_from_static_if_no_active="cromer_street"
                 )
                 st.session_state.search_results = results
                 if not results:
                     st.info("No stations found for your search.")
             except TflCycleHireSDKError as e:
                 st.session_state.error_message = f"Search Error: {e}"
-                logger.error(f"Streamlit App - Search Error: {e}", exc_info=True)
             except Exception as e:
                 st.session_state.error_message = (
                     f"An unexpected error occurred during search: {e}"
                 )
-                logger.error(
-                    f"Streamlit App - Unexpected Search Error: {e}", exc_info=True
-                )
     else:
         st.warning("Please enter a search term.")
 
-# --- Display Error Messages ---
+# --- Display Error Messages (centralized) ---
 if st.session_state.error_message:
     st.error(st.session_state.error_message)
+    st.session_state.error_message = None  # Clear after displaying once
 
-# --- 2. Select Station and Get Code ---
+# --- 3. Select Station from Search and Get Code ---
 if st.session_state.search_results:
     st.markdown("---")
     st.subheader("Search Results:")
 
-    # Filter for hirable stations to offer for selection
-    hirable_stations = [
+    hirable_stations_from_search = [
         s for s in st.session_state.search_results if s.get("terminal_name")
     ]
 
-    if not hirable_stations:
-        st.info("No stations with current bike availability found in search results.")
-    else:
-        station_options = {
-            f"{s['name']} ({s.get('subtitle', 'N/A')})": s["station_id"]
-            for s in hirable_stations
-        }
-
-        # Use a unique key for the radio/selectbox based on current results to avoid state issues
-        # This is a simple way; more robust would involve managing selection index.
-        # For minimalism, we'll clear selection if search results change.
-
-        selected_station_display_name = st.selectbox(
-            "Select a station to get a code:",
-            options=station_options.keys(),
-            key="station_select_box",
-            # index=None, # No default selection
-            # placeholder="Choose a station..."
+    if not hirable_stations_from_search:
+        st.info(
+            "No stations with current bike availability (hirable) found in search results."
         )
+        if st.session_state.search_results:  # If there are results, but none hirable
+            st.caption("Other stations found (not currently hirable):")
+            for s_non_hirable in st.session_state.search_results:
+                if not s_non_hirable.get("terminal_name"):
+                    st.write(
+                        f"- {s_non_hirable['name']} ({s_non_hirable.get('subtitle', 'N/A')})"
+                    )
+    else:
+        # Display hirable stations with options to Get Code or Add to Favorites
+        for station_info in hirable_stations_from_search:
+            # Unique key prefix for this station in the search results
+            key_prefix = f"search_{station_info['station_id']}"
 
-        if selected_station_display_name:
-            selected_station_id = station_options[selected_station_display_name]
-            # Find the full station info dict
-            selected_station_info: Optional[SearchedStationInfo] = next(
-                (s for s in hirable_stations if s["station_id"] == selected_station_id),
-                None,
+            # Check if already a favorite
+            is_favorite = any(
+                fav["station_id"] == station_info["station_id"]
+                for fav in st.session_state.favorites
             )
 
-            if selected_station_info and st.button(
-                f"Get Code for {selected_station_info['name']}", key="get_code_button"
-            ):
-                st.session_state.release_code = None  # Clear previous
-                st.session_state.error_message = None
-                with st.spinner(f"Getting code for {selected_station_info['name']}..."):
-                    try:
-                        # The SDK's get_release_code_for_searched_station will use its
-                        # internal smart token strategies.
-                        code = sdk_instance.get_release_code_for_searched_station(
-                            selected_station_info
-                        )
-                        st.session_state.release_code = code
-                        st.session_state.selected_station_id_for_code = (
-                            selected_station_id
-                        )
-                    except TflCycleHireSDKError as e:
-                        st.session_state.error_message = f"Error getting code: {e}"
-                        logger.error(
-                            f"Streamlit App - Get Code Error: {e}", exc_info=True
-                        )
-                    except Exception as e:
-                        st.session_state.error_message = (
-                            f"An unexpected error occurred: {e}"
-                        )
-                        logger.error(
-                            f"Streamlit App - Unexpected Get Code Error: {e}",
-                            exc_info=True,
-                        )
+            col_name, col_subtitle, col_action1, col_action2 = st.columns(
+                [0.4, 0.3, 0.15, 0.15]
+            )
+            with col_name:
+                st.write(f"**{station_info['name']}**")
+            with col_subtitle:
+                st.caption(f"{station_info.get('subtitle', 'N/A')}")
+            with col_action1:
+                if st.button("Get Code", key=f"{key_prefix}_getcode"):
+                    st.session_state.release_code = None  # Clear previous
+                    st.session_state.error_message = None
+                    with st.spinner(f"Getting code for {station_info['name']}..."):
+                        try:
+                            code = sdk_instance.get_release_code_for_searched_station(
+                                station_info
+                            )
+                            st.session_state.release_code = code
+                            st.session_state.selected_station_info_for_code = (
+                                station_info
+                            )
+                        except TflCycleHireSDKError as e:
+                            st.session_state.error_message = f"Error getting code: {e}"
+                        except Exception as e:
+                            st.session_state.error_message = (
+                                f"An unexpected error occurred: {e}"
+                            )
+            with col_action2:
+                if not is_favorite:
+                    if st.button(
+                        "⭐",
+                        key=f"{key_prefix}_addfav",
+                        help="Add to favorites",
+                    ):
+                        add_to_favorites(station_info)
+                        st.rerun()  # Rerun to update favorite display immediately
+                else:
+                    # Could offer remove here too, or just rely on top section for removal
+                    st.caption("✔️ Fav")
 
 
-# --- 3. Display Release Code ---
-if st.session_state.release_code and st.session_state.selected_station_id_for_code:
+# --- 4. Display Release Code ---
+if st.session_state.release_code and st.session_state.selected_station_info_for_code:
     st.markdown("---")
-    # Find station name for display
-    station_name_for_display = "Selected Station"
-    if (
-        st.session_state.search_results
-    ):  # Should always be true if code was obtained via search
-        s_info = next(
-            (
-                s
-                for s in st.session_state.search_results
-                if s["station_id"] == st.session_state.selected_station_id_for_code
-            ),
-            None,
-        )
-        if s_info:
-            station_name_for_display = s_info["name"]
-
+    station_name_for_display = st.session_state.selected_station_info_for_code["name"]
     st.subheader(f"✅ Release Code for {station_name_for_display}:")
     st.markdown(
         f"<h2 style='text-align: center; color: green;'>{st.session_state.release_code}</h2>",
@@ -1015,8 +1076,6 @@ if st.session_state.release_code and st.session_state.selected_station_id_for_co
 
 st.markdown("---")
 st.caption("Minimalistic TfL Cycle Hire App. Relies on experimental SDK features.")
-st.caption("Token reusability is NOT guaranteed long-term.")
-
-# For debugging SDK's active tokens in Streamlit
-# if st.sidebar.button("Show SDK Token State"):
-#    st.sidebar.json(sdk_instance.active_token_info if 'sdk' in st.session_state else {"sdk": "not initialized"})
+st.caption(
+    "Token reusability is NOT guaranteed long-term. Favorites are session-specific."
+)
